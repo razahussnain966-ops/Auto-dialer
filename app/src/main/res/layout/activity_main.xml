@@ -41,6 +41,43 @@
             android:layout_marginTop="8dp"
             android:text="Import from file" />
 
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Message spoken on each call"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/etMessage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@android:drawable/edit_text"
+            android:gravity="top|start"
+            android:inputType="textMultiLine"
+            android:minLines="5"
+            android:padding="8dp"
+            android:text="Welcome to Nexgen Institute of Technology! We’re thrilled to have you here, we are providing scholarship totally free education exploring a world of innovative education and opportunities. Our dedicated team is committed to nurturing your skills and guiding you toward a successful future in technology. Join us in shaping the next generation of tech leaders!" />
+
+        <CheckBox
+            android:id="@+id/cbSpeak"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:checked="true"
+            android:text="Speak this message during the call" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Start speaking after (sec) - about when people answer" />
+
+        <EditText
+            android:id="@+id/etSpeakDelay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="number"
+            android:text="8" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

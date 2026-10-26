@@ -3,6 +3,8 @@ package com.autodialer.app
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -12,14 +14,18 @@ import android.telecom.TelecomManager
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
@@ -31,6 +37,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnImport: Button
     private lateinit var tvStatus: TextView
     private lateinit var tvLog: TextView
+    private lateinit var etMessage: EditText
+    private lateinit var etSpeakDelay: EditText
+    private lateinit var cbSpeak: CheckBox
+    private lateinit var audio: AudioManager
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var savedMusicVolume = -1
+    private var speakDelay = 8
+    private var speakEnabled = false
+    private var messageText = ""
 
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var telephony: TelephonyManager
@@ -89,6 +105,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val speakRunnable = Runnable {
+        if (running && callActive && speakEnabled) speakMessage()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -104,6 +124,28 @@ class MainActivity : AppCompatActivity() {
         btnImport = findViewById(R.id.btnImport)
         tvStatus = findViewById(R.id.tvStatus)
         tvLog = findViewById(R.id.tvLog)
+        etMessage = findViewById(R.id.etMessage)
+        etSpeakDelay = findViewById(R.id.etSpeakDelay)
+        cbSpeak = findViewById(R.id.cbSpeak)
+
+        audio = getSystemService(AUDIO_SERVICE) as AudioManager
+        tts = TextToSpeech(this) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                tts?.language = Locale.US
+                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {}
+                    override fun onDone(utteranceId: String?) {
+                        runOnUiThread { onSpeechDone() }
+                    }
+
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(utteranceId: String?) {
+                        runOnUiThread { onSpeechDone() }
+                    }
+                })
+                ttsReady = true
+            }
+        }
 
         btnImport.setOnClickListener { importLauncher.launch("*/*") }
         btnStart.setOnClickListener {
@@ -114,6 +156,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        tts?.shutdown()
         unregisterCallStateListener()
         handler.removeCallbacksAndMessages(null)
     }
@@ -136,6 +179,13 @@ class MainActivity : AppCompatActivity() {
         }
         maxSeconds = etMaxSeconds.text.toString().toIntOrNull()?.coerceAtLeast(5) ?: 30
         gapSeconds = etGap.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: 5
+        speakEnabled = cbSpeak.isChecked
+        messageText = etMessage.text.toString().trim()
+        speakDelay = etSpeakDelay.text.toString().toIntOrNull()?.coerceIn(0, 120) ?: 8
+        if (speakEnabled && (messageText.isEmpty() || !ttsReady)) {
+            toast("Voice is not ready or the message is empty.")
+            return
+        }
 
         queue = numbers
         index = 0
@@ -153,6 +203,7 @@ class MainActivity : AppCompatActivity() {
         if (!running) return
         running = false
         handler.removeCallbacksAndMessages(null)
+        cleanupSpeech()
         if (callActive) endCall()
         callActive = false
         waitingForCallToStart = false
@@ -218,13 +269,16 @@ class MainActivity : AppCompatActivity() {
                     waitingForCallToStart = false
                     callActive = true
                     handler.removeCallbacks(noCallStartedRunnable)
-                    handler.postDelayed(hangUpRunnable, maxSeconds * 1000L)
+                    val limit = if (speakEnabled) maxOf(maxSeconds, speakDelay + 90) else maxSeconds
+                    handler.postDelayed(hangUpRunnable, limit * 1000L)
+                    if (speakEnabled) handler.postDelayed(speakRunnable, speakDelay * 1000L)
                 }
             }
             TelephonyManager.CALL_STATE_IDLE -> {
                 if (callActive) {
                     callActive = false
                     handler.removeCallbacks(hangUpRunnable)
+                    cleanupSpeech()
                     log("Call ended: ${queue.getOrNull(index)}")
                     index++
                     scheduleNext()
@@ -263,6 +317,50 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun speakMessage() {
+        log("Speaking message")
+        enableSpeaker(true)
+        val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        savedMusicVolume = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
+        audio.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0)
+        tts?.speak(messageText, TextToSpeech.QUEUE_FLUSH, null, "msg")
+    }
+
+    private fun onSpeechDone() {
+        if (!running || !callActive) return
+        log("Message finished - ending call")
+        handler.postDelayed({ if (running && callActive) endCall() }, 2000)
+    }
+
+    private fun cleanupSpeech() {
+        handler.removeCallbacks(speakRunnable)
+        tts?.stop()
+        if (savedMusicVolume >= 0) {
+            audio.setStreamVolume(AudioManager.STREAM_MUSIC, savedMusicVolume, 0)
+            savedMusicVolume = -1
+        }
+        enableSpeaker(false)
+    }
+
+    private fun enableSpeaker(on: Boolean) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                if (on) {
+                    val dev = audio.availableCommunicationDevices
+                        .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                    if (dev != null) audio.setCommunicationDevice(dev)
+                } else {
+                    audio.clearCommunicationDevice()
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                audio.isSpeakerphoneOn = on
+            }
+        } catch (e: Exception) {
+            log("Speaker error: ${e.message}")
+        }
+    }
+
     private fun setRunningUi(isRunning: Boolean) {
         btnStart.isEnabled = !isRunning
         btnStop.isEnabled = isRunning
@@ -270,6 +368,9 @@ class MainActivity : AppCompatActivity() {
         etMaxSeconds.isEnabled = !isRunning
         etGap.isEnabled = !isRunning
         btnImport.isEnabled = !isRunning
+        etMessage.isEnabled = !isRunning
+        etSpeakDelay.isEnabled = !isRunning
+        cbSpeak.isEnabled = !isRunning
     }
 
     private fun log(msg: String) {
