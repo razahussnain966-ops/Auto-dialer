@@ -1,6 +1,16 @@
 package com.autodialer.app
 
 import android.Manifest
+import android.animation.ObjectAnimator
+import android.animation.PropertyValuesHolder
+import android.content.res.ColorStateList
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.MotionEvent
+import android.view.View
+import android.view.animation.AccelerateDecelerateInterpolator
+import android.view.animation.DecelerateInterpolator
+import com.google.android.material.progressindicator.LinearProgressIndicator
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioDeviceInfo
@@ -18,7 +28,7 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.view.WindowManager
 import android.widget.Button
-import android.widget.CheckBox
+import android.widget.CompoundButton
 import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
@@ -39,7 +49,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvLog: TextView
     private lateinit var etMessage: EditText
     private lateinit var etSpeakDelay: EditText
-    private lateinit var cbSpeak: CheckBox
+    private lateinit var cbSpeak: CompoundButton
+    private lateinit var progress: LinearProgressIndicator
+    private lateinit var tvCount: TextView
+    private lateinit var tvNumberCount: TextView
+    private lateinit var statusDot: View
+    private lateinit var logo: View
+    private val pulseAnimators = mutableListOf<ObjectAnimator>()
     private lateinit var audio: AudioManager
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -152,6 +168,26 @@ class MainActivity : AppCompatActivity() {
             if (hasAllPermissions()) startRun() else permissionLauncher.launch(requiredPermissions)
         }
         btnStop.setOnClickListener { stopRun("Stopped by user") }
+
+        progress = findViewById(R.id.progressBar)
+        tvCount = findViewById(R.id.tvCount)
+        tvNumberCount = findViewById(R.id.tvNumberCount)
+        statusDot = findViewById(R.id.statusDot)
+        logo = findViewById(R.id.logo)
+
+        etNumbers.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+            override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                val n = parseNumbers(s?.toString() ?: "").size
+                tvNumberCount.text = if (n == 1) "1 number" else "$n numbers"
+            }
+        })
+
+        addPressAnimation(btnStart)
+        addPressAnimation(btnStop)
+        addPressAnimation(btnImport)
+        playEntrance()
     }
 
     override fun onDestroy() {
@@ -193,6 +229,7 @@ class MainActivity : AppCompatActivity() {
         waitingForCallToStart = false
         callActive = false
         tvLog.text = ""
+        updateProgress()
         setRunningUi(true)
         registerCallStateListener()
         log("Starting: ${queue.size} numbers, ${maxSeconds}s max, ${gapSeconds}s gap")
@@ -209,7 +246,8 @@ class MainActivity : AppCompatActivity() {
         waitingForCallToStart = false
         unregisterCallStateListener()
         setRunningUi(false)
-        tvStatus.text = reason
+        setStatus(reason)
+        updateProgress()
         log(reason)
     }
 
@@ -220,7 +258,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val number = queue[index]
-        tvStatus.text = "Calling ${index + 1}/${queue.size}: $number"
+        setStatus("Calling ${index + 1}/${queue.size}: $number")
+        updateProgress()
         log("Calling $number")
         waitingForCallToStart = true
         try {
@@ -244,7 +283,8 @@ class MainActivity : AppCompatActivity() {
             stopRun("Finished - all ${queue.size} numbers processed")
             return
         }
-        tvStatus.text = "Next call in ${gapSeconds}s ..."
+        setStatus("Next call in ${gapSeconds}s ...")
+        updateProgress()
         handler.postDelayed({ dialNext() }, gapSeconds * 1000L)
     }
 
@@ -361,6 +401,88 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun playEntrance() {
+        val ids = intArrayOf(
+            R.id.header, R.id.cardStatus, R.id.cardNumbers, R.id.cardMessage,
+            R.id.cardSettings, R.id.rowActions, R.id.cardLog
+        )
+        ids.forEachIndexed { i, id ->
+            val v = findViewById<View>(id)
+            v.alpha = 0f
+            v.translationY = 90f
+            v.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setStartDelay(100L + i * 90L)
+                .setDuration(550)
+                .setInterpolator(DecelerateInterpolator(1.6f))
+                .start()
+        }
+    }
+
+    private fun startPulse() {
+        stopPulse()
+        statusDot.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.success))
+        val logoPulse = ObjectAnimator.ofPropertyValuesHolder(
+            logo,
+            PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 1.12f),
+            PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 1.12f)
+        ).apply {
+            duration = 750
+            repeatMode = ObjectAnimator.REVERSE
+            repeatCount = ObjectAnimator.INFINITE
+            interpolator = AccelerateDecelerateInterpolator()
+            start()
+        }
+        val dotPulse = ObjectAnimator.ofFloat(statusDot, View.ALPHA, 1f, 0.2f).apply {
+            duration = 600
+            repeatMode = ObjectAnimator.REVERSE
+            repeatCount = ObjectAnimator.INFINITE
+            start()
+        }
+        pulseAnimators.add(logoPulse)
+        pulseAnimators.add(dotPulse)
+    }
+
+    private fun stopPulse() {
+        pulseAnimators.forEach { it.cancel() }
+        pulseAnimators.clear()
+        logo.animate().scaleX(1f).scaleY(1f).setDuration(200).start()
+        statusDot.alpha = 1f
+        statusDot.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.idle_dot))
+    }
+
+    private fun setStatus(text: String) {
+        if (tvStatus.text.toString() == text) return
+        tvStatus.animate().cancel()
+        tvStatus.animate().alpha(0f).translationY(-8f).setDuration(120).withEndAction {
+            tvStatus.text = text
+            tvStatus.translationY = 8f
+            tvStatus.animate().alpha(1f).translationY(0f).setDuration(180).start()
+        }.start()
+    }
+
+    private fun updateProgress() {
+        val total = queue.size
+        val done = index.coerceAtMost(total)
+        progress.max = maxOf(total, 1)
+        progress.setProgressCompat(done, true)
+        tvCount.text = "$done / $total"
+    }
+
+    @Suppress("ClickableViewAccessibility")
+    private fun addPressAnimation(v: View) {
+        v.setOnTouchListener { view, e ->
+            when (e.action) {
+                MotionEvent.ACTION_DOWN ->
+                    view.animate().scaleX(0.95f).scaleY(0.95f).setDuration(90).start()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                    view.animate().scaleX(1f).scaleY(1f).setDuration(160).start()
+            }
+            false
+        }
+    }
+
     private fun setRunningUi(isRunning: Boolean) {
         btnStart.isEnabled = !isRunning
         btnStop.isEnabled = isRunning
@@ -371,6 +493,9 @@ class MainActivity : AppCompatActivity() {
         etMessage.isEnabled = !isRunning
         etSpeakDelay.isEnabled = !isRunning
         cbSpeak.isEnabled = !isRunning
+        btnStart.animate().alpha(if (isRunning) 0.4f else 1f).setDuration(250).start()
+        btnStop.animate().alpha(if (isRunning) 1f else 0.4f).setDuration(250).start()
+        if (isRunning) startPulse() else stopPulse()
     }
 
     private fun log(msg: String) {
